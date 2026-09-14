@@ -1,0 +1,4 @@
+{
+  "_comment": "Copy to data/colors.json (gitignored) and fill in your real folder names. Color indices are positions into the app's fixed 12-color palette (pulled from Automattic/pocket-casts-android's Theme.folderColors / filter_01..filter_12): 0 red, 1 orange, 2 yellow, 3 green, 4 sky blue, 5 purple, 6 pink, 7 grey, 8 lavender, 9 teal, 10 blue, 11 brown.",
+  "Example Folder Name": 0
+}
