@@ -7,10 +7,11 @@ copy data/subscriptions.csv, edit the folder_name column by hand (or
 with LLM help), and feed the result back in here. A blank folder_name
 means "no folder" (top level / home screen).
 
-Always run with --dry-run first and review the printed diff. A real
-run backs up the current folder state to data/backups/ before making
-any network write, and is safe to re-run: it only sends the changes
-still needed to reach the mapping's target state.
+Dry run by default: it prints the diff and writes nothing. Review it,
+then re-run with --apply. A real run backs up the current folder state to
+data/backups/ before making any network write, re-fetches afterwards and
+reports anything that does not match the mapping, and is safe to re-run:
+it only sends the changes still needed to reach the mapping's target state.
 """
 
 from __future__ import annotations
@@ -25,6 +26,15 @@ from pocket_casts.backup import write_backup
 from pocket_casts.client import HOME_FOLDER_UUID, PocketCastsClient, PocketCastsError
 from pocket_casts.env import load_dotenv_if_present
 from pocket_casts.records import folder_record, podcast_folder_record
+from pocket_casts.safety import (
+    add_mode_flags,
+    diff_folders,
+    diff_podcast_folders,
+    is_dry_run,
+    print_dry_run_footer,
+    refetch,
+    report_verification,
+)
 
 DATA_DIR = Path(__file__).parent / "data"
 
@@ -48,7 +58,7 @@ def main() -> None:
     load_dotenv_if_present()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("mapping", type=Path, help="CSV with uuid,folder_name columns")
-    parser.add_argument("--dry-run", action="store_true", help="Print the diff and exit; makes no network calls that write data")
+    add_mode_flags(parser)
     parser.add_argument("--new-folder-color", type=int, default=0, help="Color index for newly created folders (default: 0)")
     parser.add_argument(
         "--new-folder-sort-type",
@@ -140,8 +150,8 @@ def main() -> None:
     for m in moves:
         print(f"  {m['title']}: {m['from']} -> {m['to']}")
 
-    if args.dry_run:
-        print("\nDry run -- no changes made.")
+    if is_dry_run(args):
+        print_dry_run_footer()
         return
 
     backup_path = write_backup(folders, podcasts)
@@ -167,6 +177,16 @@ def main() -> None:
         raise SystemExit(1)
 
     print(f"\nApplied {len(new_folders)} new folder(s) and {len(moves)} move(s).")
+
+    # Verify the whole mapping, not just this run's moves: it is the intended end state.
+    expected_podcasts = {
+        u: (folder_uuid_by_name[name] if name else HOME_FOLDER_UUID) for u, name in mapping.items()
+    }
+    expected_folders = {f["uuid"]: {"name": f["name"]} for f in new_folders}
+    after = refetch(client)
+    mismatches = diff_folders(after, expected_folders)
+    mismatches += diff_podcast_folders(after, expected_podcasts, folder_name_by_uuid)
+    report_verification(mismatches, backup_path)
     print("Run fetch_subscriptions.py to refresh the local cache.")
 
 

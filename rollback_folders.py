@@ -7,6 +7,10 @@ folder (or top level) they were in at backup time. It does not delete
 folders that were created after the backup -- if apply_folders.py made
 a new folder you don't want, remove it by hand in the app; this script
 only ever moves podcasts out of it, leaving it empty.
+
+Dry run by default; pass --apply to write. Before writing it takes its own
+backup of the current state (so a rollback can itself be rolled back), and
+afterwards re-fetches and reports anything that does not match the backup.
 """
 
 from __future__ import annotations
@@ -16,16 +20,26 @@ import json
 import sys
 from pathlib import Path
 
+from pocket_casts.backup import write_backup
 from pocket_casts.client import HOME_FOLDER_UUID, PocketCastsClient, PocketCastsError
 from pocket_casts.env import load_dotenv_if_present
 from pocket_casts.records import folder_record, podcast_folder_record
+from pocket_casts.safety import (
+    add_mode_flags,
+    diff_folders,
+    diff_podcast_folders,
+    is_dry_run,
+    print_dry_run_footer,
+    refetch,
+    report_verification,
+)
 
 
 def main() -> None:
     load_dotenv_if_present()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("backup", type=Path, help="Path to a data/backups/backup_*.json file")
-    parser.add_argument("--dry-run", action="store_true", help="Print the diff and exit; makes no network calls that write data")
+    add_mode_flags(parser)
     args = parser.parse_args()
 
     if not args.backup.exists():
@@ -80,9 +94,12 @@ def main() -> None:
     for m in moves:
         print(f"  {m['title']} -> folder_uuid {m['target_folder_uuid']}")
 
-    if args.dry_run:
-        print("\nDry run -- no changes made.")
+    if is_dry_run(args):
+        print_dry_run_footer()
         return
+
+    pre_rollback_backup = write_backup(list(current_folders.values()), list(current_podcasts.values()))
+    print(f"\nBacked up current (pre-rollback) state to {pre_rollback_backup}")
 
     records = [
         folder_record(
@@ -101,10 +118,22 @@ def main() -> None:
         client.sync_update(records)
     except PocketCastsError as e:
         print(f"error restoring backup: {e}", file=sys.stderr)
+        print(f"State before this attempt is backed up at {pre_rollback_backup}.", file=sys.stderr)
         raise SystemExit(1)
 
     print(f"\nRestored {len(folders_to_restore)} folder(s) and {len(moves)} podcast move(s) from {args.backup}")
     print("Run fetch_subscriptions.py to refresh the local cache.")
+
+    expected_folders = {
+        f["folderUuid"]: {k: f[k] for k in ("name", "color", "sortPosition", "podcastsSortType")}
+        for f in folders_to_restore
+    }
+    expected_podcasts = {m["uuid"]: m["target_folder_uuid"] for m in moves}
+    names = {u: f["name"] for u, f in backup_folders.items()}
+    after = refetch(client)
+    mismatches = diff_folders(after, expected_folders)
+    mismatches += diff_podcast_folders(after, expected_podcasts, names)
+    report_verification(mismatches, pre_rollback_backup)
 
 
 if __name__ == "__main__":

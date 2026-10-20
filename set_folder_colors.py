@@ -9,6 +9,9 @@ filter_01..filter_12): 0 red, 1 orange, 2 yellow, 3 green, 4 sky blue,
 Reads the folder-name -> color-index mapping from a JSON file (default
 data/colors.json, gitignored since folder names are personal). See
 colors.example.json for the shape.
+
+Dry run by default; pass --apply to write. Re-fetches afterwards and
+reports any folder whose color did not stick.
 """
 
 from __future__ import annotations
@@ -22,6 +25,14 @@ from pocket_casts.backup import write_backup
 from pocket_casts.client import PocketCastsClient, PocketCastsError
 from pocket_casts.env import load_dotenv_if_present
 from pocket_casts.records import folder_record
+from pocket_casts.safety import (
+    add_mode_flags,
+    diff_folders,
+    is_dry_run,
+    print_dry_run_footer,
+    refetch,
+    report_verification,
+)
 
 DATA_DIR = Path(__file__).parent / "data"
 
@@ -36,7 +47,7 @@ def load_colors(path: Path) -> dict[str, int]:
 def main() -> None:
     load_dotenv_if_present()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--dry-run", action="store_true", help="Print the diff and exit; makes no network calls that write data")
+    add_mode_flags(parser)
     parser.add_argument("--colors", type=Path, default=DATA_DIR / "colors.json", help="Path to a JSON file mapping folder name -> color index (default: data/colors.json)")
     args = parser.parse_args()
 
@@ -74,8 +85,8 @@ def main() -> None:
     for f in changes:
         print(f"  {f['name']}: {f['color']} -> {f['target_color']}")
 
-    if args.dry_run:
-        print("\nDry run -- no changes made.")
+    if is_dry_run(args):
+        print_dry_run_footer()
         return
 
     backup_path = write_backup(folders, podcasts)
@@ -101,6 +112,9 @@ def main() -> None:
         raise SystemExit(1)
 
     print(f"\nRecolored {len(changes)} folder(s).")
+    after = refetch(client)
+    expected = {f["folderUuid"]: {"name": f["name"], "color": f["target_color"]} for f in changes}
+    report_verification(diff_folders(after, expected), backup_path)
     print("Run fetch_subscriptions.py to refresh the local cache.")
 
 

@@ -4,6 +4,11 @@
 Typical use: after apply_folders.py reclassifies everything into new
 folders, the old folder names are often left behind empty. This finds
 and deletes them. Backs up current state first, same as apply_folders.py.
+
+Dry run by default; pass --apply to delete. Refuses to run if the fetched
+podcast list is less than 80% of the last local snapshot's count -- a
+truncated list from a transient API problem would make full folders look
+empty. After deleting, re-fetches and checks the folders are really gone.
 """
 
 from __future__ import annotations
@@ -16,12 +21,24 @@ from pocket_casts.backup import write_backup
 from pocket_casts.client import PocketCastsClient, PocketCastsError
 from pocket_casts.env import load_dotenv_if_present
 from pocket_casts.records import folder_record
+from pocket_casts.safety import (
+    add_mode_flags,
+    diff_folders,
+    is_dry_run,
+    last_snapshot_podcast_count,
+    print_dry_run_footer,
+    refetch,
+    report_verification,
+)
+
+# Refuse if the fetched podcast count drops below this share of the last snapshot.
+MIN_COUNT_RATIO = 0.8
 
 
 def main() -> None:
     load_dotenv_if_present()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true", help="Print the empty folders and exit; makes no network calls that write data")
+    add_mode_flags(parser)
     args = parser.parse_args()
 
     client = PocketCastsClient()
@@ -34,6 +51,22 @@ def main() -> None:
 
     folders = current.get("folders", [])
     podcasts = current.get("podcasts", [])
+
+    if not podcasts:
+        raise SystemExit("error: Pocket Casts returned no podcasts at all -- refusing to treat every folder as empty.")
+    snapshot = last_snapshot_podcast_count()
+    if snapshot is None:
+        raise SystemExit("error: no local snapshot to sanity-check the podcast count against. "
+                         "Run fetch_subscriptions.py first.")
+    baseline, snapshot_path = snapshot
+    if baseline and len(podcasts) < MIN_COUNT_RATIO * baseline:
+        raise SystemExit(
+            f"error: fetched {len(podcasts)} podcasts but the last snapshot ({snapshot_path.name}) had "
+            f"{baseline}. That looks like a partial list, which would make full folders look empty. "
+            "Refusing. Try again later, or re-run fetch_subscriptions.py if you really did unsubscribe "
+            "from that many.")
+    print(f"Podcast count check: {len(podcasts)} now vs {baseline} in {snapshot_path.name} -- OK")
+
     counts = Counter(p.get("folderUuid") for p in podcasts if p.get("folderUuid"))
     empty_folders = [f for f in folders if counts.get(f["folderUuid"], 0) == 0]
 
@@ -45,8 +78,8 @@ def main() -> None:
     for f in empty_folders:
         print(f"  - {f['name']}")
 
-    if args.dry_run:
-        print("\nDry run -- no changes made.")
+    if is_dry_run(args):
+        print_dry_run_footer()
         return
 
     backup_path = write_backup(folders, podcasts)
@@ -73,6 +106,8 @@ def main() -> None:
         raise SystemExit(1)
 
     print(f"\nDeleted {len(empty_folders)} empty folder(s).")
+    after = refetch(client)
+    report_verification(diff_folders(after, {}, deleted={f["folderUuid"] for f in empty_folders}), backup_path)
     print("Run fetch_subscriptions.py to refresh the local cache.")
 
 
